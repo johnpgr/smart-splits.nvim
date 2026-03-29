@@ -58,6 +58,8 @@ local logger = {
   end,
 }
 
+local user_var_handler_registered = false
+
 local function is_vim(pane)
   -- if type is PaneInformation
   if pane.user_vars ~= nil then
@@ -71,6 +73,45 @@ local function is_vim(pane)
 end
 
 local Directions = { 'Left', 'Down', 'Up', 'Right' }
+
+local function ensure_user_var_handler()
+  if user_var_handler_registered then
+    return
+  end
+
+  wezterm.on('user-var-changed', function(window, pane, name, value)
+    if name ~= 'SMART_SPLITS_CMD' or value == nil or value == '' then
+      return
+    end
+
+    local parts = {}
+    for part in value:gmatch('[^:]+') do
+      table.insert(parts, part)
+    end
+
+    local action = parts[1]
+    local direction = parts[2]
+    if direction == nil then
+      logger.warn('[smart-splits.nvim]: Ignoring malformed SMART_SPLITS_CMD: ', value)
+      return
+    end
+
+    if action == 'move' then
+      window:perform_action({ ActivatePaneDirection = direction }, pane)
+      return
+    end
+
+    if action == 'resize' then
+      local amount = tonumber(parts[3]) or _smart_splits_wezterm_config.default_amount
+      window:perform_action({ AdjustPaneSize = { direction, amount } }, pane)
+      return
+    end
+
+    logger.warn('[smart-splits.nvim]: Ignoring unknown SMART_SPLITS_CMD action: ', action)
+  end)
+
+  user_var_handler_registered = true
+end
 
 ---@param resize_or_move 'resize'|'move'
 ---@param key string
@@ -164,6 +205,9 @@ local function apply_to_config(config_builder, plugin_config)
       table.insert(config_builder.keys, keymap)
     end
   end
+
+  ensure_user_var_handler()
+
   return config_builder
 end
 

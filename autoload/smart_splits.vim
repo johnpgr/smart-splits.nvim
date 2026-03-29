@@ -57,6 +57,10 @@ function smart_splits#write_wezterm_var(var)
   return l:success
 endfunction
 
+function smart_splits#format_wezterm_user_var(name, val)
+  return printf("\033]1337;SetUserVar=%s=%s\007", a:name, s:encode_b64(a:val, 0))
+endfunction
+
 function smart_splits#format_wezterm_var(val)
-  return printf("\033]1337;SetUserVar=IS_NVIM=%s\007", s:encode_b64(a:val, 0))
+  return smart_splits#format_wezterm_user_var('IS_NVIM', a:val)
 endfunction
