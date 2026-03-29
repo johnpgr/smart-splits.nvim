@@ -1,6 +1,5 @@
 local Direction = require('smart-splits.types').Direction
 local config = require('smart-splits.config')
-local log = require('smart-splits.log')
 
 local dir_keys_wezterm = {
   [Direction.left] = 'Left',
@@ -16,6 +15,7 @@ local dir_keys_wezterm_splits = {
   [Direction.down] = '--bottom',
 }
 
+--- Synchronous CLI call — used for edge-detection and pane-info refresh
 local function wezterm_exec(cmd)
   local command = vim.deepcopy(cmd)
   table.insert(command, 1, config.wezterm_cli_path)
@@ -23,52 +23,43 @@ local function wezterm_exec(cmd)
   return require('smart-splits.utils').system(command)
 end
 
-local tab_id
+--- Fire-and-forget CLI call — used for pane actions (move, resize, split)
+local function wezterm_exec_async(cmd)
+  local command = vim.deepcopy(cmd)
+  table.insert(command, 1, config.wezterm_cli_path)
+  table.insert(command, 2, 'cli')
+  vim.system(command, { text = true })
+end
 
-local function init_tab_id()
+-- Monotonic counter: incremented only when next_pane verifies a neighbor
+-- exists. move_multiplexer_inner compares current_pane_id() before/after
+-- next_pane() to decide whether the multiplexer actually switched panes.
+local pane_id_counter = 0
+
+-- Cached pane metadata (zoom state, etc.), refreshed on layout events
+local cached_pane_info = nil
+
+local function refresh_pane_info()
   local output, code = wezterm_exec({ 'list', '--format', 'json' })
   if code ~= 0 or not output or #output == 0 then
-    -- set to false to avoid trying again
-    log.warn('wezterm init: failed to detect tab_id: %s', output)
-    tab_id = false
+    cached_pane_info = nil
     return
   end
 
-  local data = vim.json.decode(output) --[[@as table]]
+  local ok, data = pcall(vim.json.decode, output)
+  if not ok or type(data) ~= 'table' then
+    cached_pane_info = nil
+    return
+  end
+
+  local pane_id = vim.env.WEZTERM_PANE
   for _, pane in ipairs(data) do
-    if tostring(pane.pane_id) == tostring(vim.env.WEZTERM_PANE) then
-      tab_id = pane.tab_id
+    if tostring(pane.pane_id) == pane_id then
+      cached_pane_info = pane
       return
     end
   end
-
-  -- set to false to avoid trying again
-  tab_id = false
-end
-
-local function current_pane_info()
-  if tab_id == nil then
-    init_tab_id()
-  end
-
-  if tab_id == false then
-    return nil
-  end
-
-  local output, code = wezterm_exec({ 'list', '--format', 'json' })
-  if code ~= 0 or not output or #output == 0 then
-    log.warn('wezterm: failed to get current pane info', output)
-    return nil
-  end
-
-  local data = vim.json.decode(output) --[[@as table]]
-  for _, pane in ipairs(data) do
-    if pane.tab_id == tab_id and pane.is_active then
-      return pane
-    end
-  end
-
-  return nil
+  cached_pane_info = nil
 end
 
 ---@type SmartSplitsMultiplexer
@@ -77,50 +68,28 @@ local M = {} ---@diagnostic disable-line: missing-fields
 M.type = 'wezterm'
 
 function M.current_pane_id()
-  local current_pane = current_pane_info()
-  -- uses API that requires newest version of Wezterm
-  if current_pane ~= nil then
-    return current_pane.pane_id
-  end
-
-  local output = wezterm_exec({ 'list-clients', '--format', 'json' }) --[[@as string]]
-  local data = vim.json.decode(output) --[[@as table]]
-  if #data == 0 then
-    return nil
-  end
-  -- if more than one client, get the active one
-  if #data > 1 then
-    table.sort(data, function(a, b)
-      return a.idle_time.nanos < b.idle_time.nanos
-    end)
-  end
-  return data[1].focused_pane_id
+  return pane_id_counter
 end
 
 function M.current_pane_at_edge(direction)
-  -- try the new way first
   local output, code = wezterm_exec({ 'get-pane-direction', direction })
   if code == 0 then
     local ok, value = pcall(tonumber, output)
     return ok and value == nil
   end
-  local pane_id = M.current_pane_id()
-  wezterm_exec({ 'activate-pane-direction', direction })
-  local new_pane_id = M.current_pane_id()
-  wezterm_exec({ 'activate-pane', '--pane-id', pane_id })
-  return pane_id == new_pane_id
+  -- Fallback for older wezterm without get-pane-direction:
+  -- assume not at edge so navigation is attempted.
+  return false
 end
 
 function M.is_in_session()
-  return M.current_pane_id() ~= nil
+  return vim.env.WEZTERM_PANE ~= nil
 end
 
 function M.current_pane_is_zoomed()
-  local current_pane = current_pane_info()
-  if current_pane then
-    return current_pane.is_zoomed
+  if cached_pane_info then
+    return cached_pane_info.is_zoomed == true
   end
-
   return false
 end
 
@@ -129,9 +98,15 @@ function M.next_pane(direction)
     return false
   end
 
+  -- Guard: don't report a move that wezterm will ignore
+  if M.current_pane_at_edge(direction) then
+    return false
+  end
+
   direction = dir_keys_wezterm[direction] ---@diagnostic disable-line
-  local _, code = wezterm_exec({ 'activate-pane-direction', direction })
-  return code == 0
+  wezterm_exec_async({ 'activate-pane-direction', direction })
+  pane_id_counter = pane_id_counter + 1
+  return true
 end
 
 function M.resize_pane(direction, amount)
@@ -140,8 +115,8 @@ function M.resize_pane(direction, amount)
   end
 
   direction = dir_keys_wezterm[direction] ---@diagnostic disable-line
-  local _, code = wezterm_exec({ 'adjust-pane-size', '--amount', amount, direction })
-  return code == 0
+  wezterm_exec_async({ 'adjust-pane-size', '--amount', tostring(amount), direction })
+  return true
 end
 
 function M.split_pane(direction, size)
@@ -150,9 +125,8 @@ function M.split_pane(direction, size)
     table.insert(args, '--cells')
     table.insert(args, size)
   end
-  local _, code = wezterm_exec(args)
-  M.update_mux_layout_details()
-  return code == 0
+  wezterm_exec_async(args)
+  return true
 end
 
 function M.on_init()
@@ -168,7 +142,7 @@ function M.on_exit()
 end
 
 function M.update_mux_layout_details()
-  -- Not implemented yet - check Kitty mux for reference
+  refresh_pane_info()
 end
 
 return M
