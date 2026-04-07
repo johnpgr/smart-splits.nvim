@@ -62,7 +62,7 @@ local function refresh_edge_for_direction(direction)
     return nil
   end
 
-  local output, code = wezterm_exec({ 'get-pane-direction', direction })
+  local output, code = wezterm_exec({ 'get-pane-direction', wezterm_direction })
   if code == 0 then
     local has_neighbor = has_neighbor_for_output(output or '')
     edge_cache[wezterm_direction] = has_neighbor
