@@ -140,6 +140,12 @@ function M.current_pane_is_zoomed()
   return false
 end
 
+---Move to an adjacent wezterm pane via OSC.
+---Return value semantics: true means the OSC write succeeded and pane_id_counter
+---incremented, not that wezterm guaranteed a pane switch. Callers should compare
+---current_pane_id() before/after to verify an actual move occurred.
+---@param direction SmartSplitsDirection
+---@return boolean
 function M.next_pane(direction)
   if not M.is_in_session() then
     return false
@@ -162,9 +168,17 @@ function M.next_pane(direction)
   end
 
   pane_id_counter = pane_id_counter + 1
+  -- Deferred refresh: we moved to a new pane with different neighbors.
+  vim.defer_fn(M.update_mux_layout_details, 100)
   return true
 end
 
+---Resize the current wezterm pane via OSC.
+---Return value semantics: reflects OSC write success, not end-to-end confirmation
+---that wezterm actually resized the pane. False only means the write failed.
+---@param direction SmartSplitsDirection
+---@param amount number
+---@return boolean
 function M.resize_pane(direction, amount)
   if not M.is_in_session() then
     return false
@@ -182,6 +196,13 @@ function M.resize_pane(direction, amount)
   )
 end
 
+---Split the current wezterm pane asynchronously.
+---Return value semantics: async fire-and-forget; true is optimistic since we
+---don't await the CLI result. If the split fails silently, neovim-side fallbacks
+---in api.lua won't fire (they check the boolean return).
+---@param direction SmartSplitsDirection
+---@param size number|nil
+---@return boolean
 function M.split_pane(direction, size)
   local args = { 'split-pane', dir_keys_wezterm_splits[direction] }
   if size then
@@ -189,6 +210,8 @@ function M.split_pane(direction, size)
     table.insert(args, size)
   end
   wezterm_exec_async(args)
+  -- Deferred refresh: split changes adjacency; don't block waiting for CLI.
+  vim.defer_fn(M.update_mux_layout_details, 200)
   return true
 end
 
