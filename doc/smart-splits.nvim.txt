@@ -413,12 +413,12 @@ WEZTERM ~
   loading modules unnecessarily, so it should have minimal impact on your startup
   time. It adds about 0.07ms on my setup.
 
-  [!NOTE] Pane resizing currently requires a nightly build of Wezterm. Check the
-  output of `wezterm cli adjust-pane-size --help` to see if your build supports
-  it; if not, you can check how to obtain a nightly build by following the
-  instructions here <https://wezfurlong.org/wezterm/installation.html>.
-First, ensure that the `wezterm` CLI is on your `$PATH`, as the CLI is used by
-the integration.
+  [!NOTE] Cross-pane move and resize requests are sent over OSC user vars and
+  handled inside Wezterm. `wezterm cli` is still used in the background to
+  refresh pane-edge and zoom caches, and to create new panes for
+  `at_edge = 'split'`.
+First, ensure that the `wezterm` CLI is on your `$PATH`, as it is still used by
+the integration for background layout refreshes and pane splitting.
 
 Then, if you’re on Wezterm nightly, you can use Wezterm’s experimental
 plugin loader
@@ -457,6 +457,8 @@ Otherwise, add the following snippet to your `~/.config/wezterm/wezterm.lua`:
 >lua
     local w = require('wezterm')
     
+    local default_resize_amount = 3
+    
     -- if you are *NOT* lazy-loading smart-splits.nvim (recommended)
     local function is_vim(pane)
       -- this is set by the plugin, and unset on ExitPre in Neovim
@@ -483,6 +485,23 @@ Otherwise, add the following snippet to your `~/.config/wezterm/wezterm.lua`:
       k = 'Up',
       l = 'Right',
     }
+    
+    w.on('user-var-changed', function(window, pane, name, value)
+      if name ~= 'SMART_SPLITS_CMD' or value == nil or value == '' then
+        return
+      end
+    
+      local parts = {}
+      for part in value:gmatch('[^:]+') do
+        table.insert(parts, part)
+      end
+    
+      if parts[1] == 'move' and parts[2] ~= nil then
+        window:perform_action({ ActivatePaneDirection = parts[2] }, pane)
+      elseif parts[1] == 'resize' and parts[2] ~= nil then
+        window:perform_action({ AdjustPaneSize = { parts[2], tonumber(parts[3]) or default_resize_amount } }, pane)
+      end
+    end)
     
     local function split_nav(resize_or_move, key)
       return {
@@ -520,6 +539,11 @@ Otherwise, add the following snippet to your `~/.config/wezterm/wezterm.lua`:
       },
     }
 <
+
+If you use the plugin loader path, `apply_to_config()` installs the
+`SMART_SPLITS_CMD` handler for you. If you use a custom Wezterm config instead,
+you need an equivalent `user-var-changed` handler so Neovim can signal
+cross-pane moves and resizes without spawning `wezterm cli` on each keypress.
 
 
 KITTY ~
